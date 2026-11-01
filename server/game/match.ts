@@ -1,10 +1,19 @@
-import type { WeaponSpec, MatchState, PlayerState, Team, Vec3, ServerToClient, ClientToServer } from '../../shared/protocol.js';
+import type { WeaponSpec, MatchState, PlayerState, Team, Vec3, ServerToClient, ClientToServer, WinReason } from '../../shared/protocol.js';
 import { validateSpec, specPoints } from '../../shared/budget.js';
 import { makeMap, collide, raycast, norm, add, scale, dist, sub } from './map.js';
 import { makeServiceMap, type GameServiceMap } from '../services/vulnService.js';
 import { LuaSandbox } from '../sandbox/pool.js';
 import { WEAPON_TEMPLATES } from '../../shared/templates.js';
 import type { MatchConfig } from './config.js';
+
+const BOT_NAMES = ['Bot-Rex', 'Bot-Vox', 'Bot-Zed', 'Bot-Nyx', 'Bot-Ace', 'Bot-Kai'];
+
+function angleDiff(a: number, b: number): number {
+  let d = (b - a) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
 
 export interface PlayerHandle {
   id: number;
@@ -26,12 +35,15 @@ export interface PlayerHandle {
   hacks: number;
   slowUntil: number;
   terminal: number | null;
-  botState?: { targetId: number | null; nextDecisionAt: number; lastSeen: number };
+  botState?: { targetId: number | null; nextDecisionAt: number; lastSeen: number; seenSince: number; strafeDir: number };
 }
+
+interface Projectile { pos: Vec3; dir: Vec3; speed: number; shooterId: number; spec: WeaponSpec; life: number }
 
 export class Match {
   players = new Map<number, PlayerHandle>();
   private nextPlayerId = 1;
+  private botCounter = 0;
   private map = makeMap();
   private services: GameServiceMap;
   private sandbox: LuaSandbox;
@@ -40,9 +52,9 @@ export class Match {
   phaseEndsAt = 0;
   score = { red: 0, blue: 0 };
   winner: Team | null = null;
-  winReason: 'elimination' | 'hack' | null = null;
+  winReason: WinReason | null = null;
   hackAlerts: { team: Team; serverId: number; at: number }[] = [];
-  private projectiles: { pos: Vec3; dir: Vec3; speed: number; shooterId: number; spec: WeaponSpec }[] = [];
+  private projectiles: Projectile[] = [];
   private events: ServerToClient[] = [];
 
   constructor(sandbox: LuaSandbox, cfg: MatchConfig) {
@@ -70,7 +82,7 @@ export class Match {
       weapon: spec ?? this.fallbackSpec(),
       ammo: spec?.magazine ?? 20, lastShotAt: 0, reloadUntil: 0,
       kills: 0, deaths: 0, hacks: 0, slowUntil: 0, terminal: null,
-      botState: bot ? { targetId: null, nextDecisionAt: 0, lastSeen: 0 } : undefined,
+      botState: bot ? { targetId: null, nextDecisionAt: 0, lastSeen: 0, seenSince: 0, strafeDir: Math.random() < 0.5 ? 1 : -1 } : undefined,
     };
     this.players.set(id, p);
     return p;
@@ -78,6 +90,29 @@ export class Match {
 
   removePlayer(id: number) {
     this.players.delete(id);
+  }
+
+  pickTeam(): Team {
+    const humans = { red: 0, blue: 0 };
+    for (const p of this.players.values()) if (!p.bot) humans[p.team]++;
+    return humans.red <= humans.blue ? 'red' : 'blue';
+  }
+
+  rebalanceBots() {
+    const per = this.cfg.playersPerTeam || 2;
+    for (const team of ['red', 'blue'] as Team[]) {
+      let members = [...this.players.values()].filter((p) => p.team === team);
+      while (members.length > per) {
+        const bot = members.find((p) => p.bot);
+        if (!bot) break;
+        this.players.delete(bot.id);
+        members = members.filter((p) => p !== bot);
+      }
+      while (members.length < per) {
+        const name = BOT_NAMES[this.botCounter++ % BOT_NAMES.length];
+        members.push(this.addPlayer(name, team, true));
+      }
+    }
   }
 
   private templateSpec(code: string): WeaponSpec | null {
@@ -202,7 +237,7 @@ export class Match {
       this.resolveShot(p, origin, dir, 100);
     } else {
       this.projectiles.push({
-        pos: origin, dir, speed: p.weapon.projectileSpeed, shooterId: p.id, spec: p.weapon,
+        pos: origin, dir, speed: p.weapon.projectileSpeed, shooterId: p.id, spec: p.weapon, life: 0,
       });
     }
     this.events.push({ t: 'shot', shooterId: p.id, from: origin, to: add(origin, scale(dir, 100)), weapon: p.weapon.name });
@@ -217,22 +252,27 @@ export class Match {
       const t = this.rayHitPlayer(origin, dir, target, bestT);
       if (t !== null) { bestT = t; hitPlayer = target; }
     }
-    if (hitPlayer) {
-      this.applyDamage(hitPlayer, shooter.weapon.damage, shooter);
-      if (shooter.weapon.knockback > 0) {
-        const push = scale(norm(dir), shooter.weapon.knockback);
-        hitPlayer.pos = collide(add(hitPlayer.pos, push), this.map, this.cfg.playerRadius);
-      }
-      if (shooter.weapon.slow > 0) hitPlayer.slowUntil = Date.now() + 1000 * shooter.weapon.slow;
-      if (shooter.weapon.aoeRadius > 0) {
-        for (const target of this.players.values()) {
-          if (target.id === hitPlayer.id || target.team === shooter.team || !target.alive) continue;
-          const d = dist(target.pos, hitPlayer.pos);
-          if (d <= shooter.weapon.aoeRadius) {
-            const aoeDmg = shooter.weapon.damage * shooter.weapon.aoeDamageFalloff * (1 - d / shooter.weapon.aoeRadius);
-            this.applyDamage(target, aoeDmg, shooter);
-          }
-        }
+    if (hitPlayer) this.applyHit(shooter, hitPlayer, shooter.weapon, dir);
+  }
+
+  private applyHit(shooter: PlayerHandle, target: PlayerHandle, spec: WeaponSpec, dir: Vec3) {
+    this.applyDamage(target, spec.damage, shooter);
+    if (spec.knockback > 0) {
+      target.pos = collide(add(target.pos, scale(norm(dir), spec.knockback)), this.map, this.cfg.playerRadius);
+    }
+    if (spec.slow > 0) target.slowUntil = Date.now() + 1000 * spec.slow;
+    if (spec.aoeRadius > 0) this.splash(shooter, target.pos, spec, target.id);
+  }
+
+  private splash(shooter: PlayerHandle, center: Vec3, spec: WeaponSpec, skipId: number) {
+    if (spec.aoeRadius <= 0) return;
+    this.events.push({ t: 'explosion', pos: center, radius: spec.aoeRadius });
+    for (const target of this.players.values()) {
+      if (target.id === skipId || target.team === shooter.team || !target.alive) continue;
+      const d = dist(target.pos, center);
+      if (d <= spec.aoeRadius) {
+        const aoeDmg = spec.damage * spec.aoeDamageFalloff * (1 - d / spec.aoeRadius);
+        this.applyDamage(target, aoeDmg, shooter);
       }
     }
   }
@@ -254,6 +294,7 @@ export class Match {
   }
 
   private applyDamage(target: PlayerHandle, dmg: number, shooter: PlayerHandle) {
+    if (!target.alive || this.phase !== 'live') return;
     target.hp -= dmg;
     this.events.push({ t: 'hit', targetId: target.id, dmg: Math.round(dmg) });
     if (target.hp <= 0) {
@@ -278,7 +319,17 @@ export class Match {
     }
   }
 
-  endRound(winner: Team, reason: 'elimination' | 'hack') {
+  private timeoutWinner(): Team {
+    const s = { red: { a: 0, hp: 0 }, blue: { a: 0, hp: 0 } };
+    for (const p of this.players.values()) {
+      if (p.alive) { s[p.team].a++; s[p.team].hp += p.hp; }
+    }
+    if (s.red.a !== s.blue.a) return s.red.a > s.blue.a ? 'red' : 'blue';
+    if (s.red.hp !== s.blue.hp) return s.red.hp > s.blue.hp ? 'red' : 'blue';
+    return 'blue';
+  }
+
+  endRound(winner: Team, reason: WinReason) {
     if (this.phase === 'ended') return;
     this.phase = 'ended';
     this.winner = winner;
@@ -292,6 +343,18 @@ export class Match {
     this.phaseEndsAt = Date.now() + this.cfg.prepSeconds * 1000;
     this.services.resetAll();
     this.hackAlerts = [];
+    this.winner = null;
+    this.winReason = null;
+    this.projectiles = [];
+    for (const p of this.players.values()) {
+      p.alive = true;
+      p.hp = p.maxHp;
+      p.pos = { ...this.spawnPoint(p.team, p.id) };
+      p.ammo = p.weapon.magazine;
+      p.reloadUntil = 0;
+      p.terminal = null;
+      if (p.botState) { p.botState.targetId = null; p.botState.nextDecisionAt = 0; }
+    }
   }
 
   startLive() {
@@ -309,9 +372,8 @@ export class Match {
   tick(dtMs: number) {
     const now = Date.now();
     if (this.phase === 'prep' && now > this.phaseEndsAt) this.startLive();
-    if (this.phase === 'live' && now > this.phaseEndsAt) {
-      this.endRound('red', 'elimination');
-    }
+    if (this.phase === 'live' && now > this.phaseEndsAt) this.endRound(this.timeoutWinner(), 'timeout');
+    if (this.phase === 'ended' && now > this.phaseEndsAt) this.startPrep();
 
     for (const p of this.players.values()) {
       if (!p.alive && this.phase === 'live' && now > p.respawnAt) {
@@ -319,43 +381,126 @@ export class Match {
         p.hp = p.maxHp;
         p.pos = { ...this.spawnPoint(p.team, p.id) };
         p.ammo = p.weapon.magazine;
+        if (p.botState) p.botState.nextDecisionAt = 0;
       }
       if (p.bot && this.phase === 'live') this.tickBot(p, dtMs);
     }
 
-    const step = dtMs / 1000;
-    const remaining: typeof this.projectiles = [];
+    this.tickProjectiles(dtMs / 1000);
+  }
+
+  private tickProjectiles(step: number) {
+    const remaining: Projectile[] = [];
     for (const pr of this.projectiles) {
-      pr.pos = add(pr.pos, scale(pr.dir, pr.speed * step));
       const shooter = this.players.get(pr.shooterId);
       if (!shooter) continue;
-      this.resolveShot(shooter, pr.pos, pr.dir, 2);
+      pr.life += step;
+      if (pr.life > 3) continue;
+      const stepLen = pr.speed * step;
+      const wall = raycast(pr.pos, pr.dir, this.map, stepLen);
+      let bestT = wall ? wall.t : stepLen;
+      let hitPlayer: PlayerHandle | null = null;
+      for (const target of this.players.values()) {
+        if (target.id === shooter.id || target.team === shooter.team || !target.alive) continue;
+        const t = this.rayHitPlayer(pr.pos, pr.dir, target, bestT);
+        if (t !== null) { bestT = t; hitPlayer = target; }
+      }
+      const end = add(pr.pos, scale(pr.dir, bestT));
+      if (hitPlayer) {
+        this.applyHit(shooter, hitPlayer, pr.spec, pr.dir);
+        continue;
+      }
+      if (wall) {
+        this.splash(shooter, end, pr.spec, -1);
+        continue;
+      }
+      pr.pos = end;
+      remaining.push(pr);
     }
     this.projectiles = remaining;
   }
 
-  private tickBot(p: PlayerHandle, dtMs: number) {
-    const now = Date.now();
-    const st = p.botState!;
-    const enemies = [...this.players.values()].filter((e) => e.team !== p.team && e.alive);
-    let target = st.targetId !== null ? this.players.get(st.targetId) : null;
-    if (!target || !target.alive) {
-      target = enemies[0] ?? null;
-      st.targetId = target?.id ?? null;
-    }
-    if (p.terminal !== null && target && dist(p.pos, target.pos) < 15) p.terminal = null;
-    if (target) {
-      const d = dist(p.pos, target.pos);
-      p.yaw = Math.atan2(target.pos.x - p.pos.x, target.pos.z - p.pos.z);
-      if (d > 8) {
-        const dirx = Math.sin(p.yaw);
-        const dirz = Math.cos(p.yaw);
-        const nx = p.pos.x + dirx * this.cfg.playerSpeed * (dtMs / 1000);
-        const nz = p.pos.z + dirz * this.cfg.playerSpeed * (dtMs / 1000);
-        p.pos = collide({ x: nx, y: 0, z: nz }, this.map, this.cfg.playerRadius);
+  private hasLOS(a: Vec3, b: Vec3): boolean {
+    const o = add(a, { x: 0, y: this.cfg.playerEye, z: 0 });
+    const t = add(b, { x: 0, y: this.cfg.playerEye, z: 0 });
+    const d = dist(o, t);
+    if (d < 1e-6) return true;
+    return !raycast(o, norm(sub(t, o)), this.map, d);
+  }
+
+  private botStep(p: PlayerHandle, fwd: number, strafe: number, step: number) {
+    const fx = Math.sin(p.yaw), fz = Math.cos(p.yaw);
+    const rx = Math.cos(p.yaw), rz = -Math.sin(p.yaw);
+    let vx = fx * fwd + rx * strafe;
+    let vz = fz * fwd + rz * strafe;
+    const l = Math.hypot(vx, vz);
+    if (l < 1e-6) return;
+    vx /= l; vz /= l;
+    for (const off of [0, 0.6, -0.6, 1.2, -1.2, 2.0, -2.0]) {
+      const c = Math.cos(off), s = Math.sin(off);
+      const dx = vx * c - vz * s;
+      const dz = vx * s + vz * c;
+      const np = collide({ x: p.pos.x + dx * step, y: 0, z: p.pos.z + dz * step }, this.map, this.cfg.playerRadius);
+      if (Math.hypot(np.x - p.pos.x, np.z - p.pos.z) >= step * 0.6) {
+        p.pos = np;
+        return;
       }
-      const pitch = Math.atan2(this.cfg.playerEye - this.cfg.playerEye, d);
-      this.tryShoot(p, 0);
+    }
+  }
+
+  private tickBot(p: PlayerHandle, dtMs: number) {
+    if (!p.alive) return;
+    const now = Date.now();
+    const dt = dtMs / 1000;
+    const st = p.botState!;
+    const reactionMs = this.cfg.botReactionMs ?? 250;
+    const aimErrDeg = this.cfg.botAimErrorDeg ?? 4;
+
+    if (now >= st.nextDecisionAt) {
+      st.nextDecisionAt = now + 400 + Math.random() * 400;
+      let best: PlayerHandle | null = null;
+      let bestScore = Infinity;
+      for (const e of this.players.values()) {
+        if (e.team === p.team || !e.alive) continue;
+        const score = dist(p.pos, e.pos) + (this.hasLOS(p.pos, e.pos) ? 0 : 12);
+        if (score < bestScore) { bestScore = score; best = e; }
+      }
+      st.targetId = best ? best.id : null;
+      if (Math.random() < 0.5) st.strafeDir = -st.strafeDir;
+    }
+
+    const target = st.targetId !== null ? this.players.get(st.targetId) : undefined;
+    if (!target || !target.alive) {
+      st.targetId = null;
+      st.nextDecisionAt = 0;
+      return;
+    }
+
+    const d = dist(p.pos, target.pos);
+    const vis = this.hasLOS(p.pos, target.pos);
+    if (vis) {
+      if (now - st.lastSeen > 300) st.seenSince = now;
+      st.lastSeen = now;
+    }
+
+    const want = Math.atan2(target.pos.x - p.pos.x, target.pos.z - p.pos.z);
+    const diff = angleDiff(p.yaw, want);
+    const maxTurn = 7 * dt;
+    p.yaw += Math.abs(diff) <= maxTurn ? diff : Math.sign(diff) * maxTurn;
+
+    const speed = this.cfg.playerSpeed * (now < p.slowUntil ? 0.5 : 1);
+    let fwd = 1;
+    if (vis) fwd = d > 11 ? 1 : d < 5 ? -0.6 : 0;
+    const strafe = vis ? st.strafeDir * 0.8 : 0;
+    this.botStep(p, fwd, strafe, speed * dt);
+
+    if (vis && d < 45 && now - st.seenSince >= reactionMs && Math.abs(angleDiff(p.yaw, want)) < 0.12) {
+      const err = (aimErrDeg * Math.PI) / 180;
+      const yaw0 = p.yaw;
+      p.yaw += (Math.random() - 0.5) * 2 * err;
+      const pitch = Math.atan2(1.0 - this.cfg.playerEye, d);
+      this.tryShoot(p, pitch);
+      p.yaw = yaw0;
     }
   }
 
@@ -363,7 +508,8 @@ export class Match {
     const players: PlayerState[] = [...this.players.values()].map((p) => ({
       id: p.id, name: p.name, team: p.team, bot: p.bot, hp: Math.max(0, Math.round(p.hp)),
       maxHp: p.maxHp, pos: p.pos, yaw: p.yaw, alive: p.alive,
-      weaponName: p.weapon.name, kills: p.kills, deaths: p.deaths, hacks: p.hacks,
+      weaponName: p.weapon.name, ammo: p.ammo, magazine: p.weapon.magazine,
+      kills: p.kills, deaths: p.deaths, hacks: p.hacks,
     }));
     const servers = this.services.services.map((s) => ({
       id: s.id, pos: this.map.terminals.find((t) => t.serverId === s.id)!.pos,

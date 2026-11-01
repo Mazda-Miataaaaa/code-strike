@@ -54,6 +54,8 @@ export interface PlayerState {
   yaw: number;
   alive: boolean;
   weaponName: string;
+  ammo: number;
+  magazine: number;
   kills: number;
   deaths: number;
   hacks: number;
@@ -68,6 +70,8 @@ export interface ServerStateMap {
 
 export type Phase = 'lobby' | 'prep' | 'live' | 'ended';
 
+export type WinReason = 'elimination' | 'hack' | 'timeout';
+
 export interface MatchState {
   phase: Phase;
   phaseEndsAt: number;
@@ -75,7 +79,7 @@ export interface MatchState {
   players: PlayerState[];
   servers: ServerStateMap[];
   winner: Team | null;
-  winReason: 'elimination' | 'hack' | null;
+  winReason: WinReason | null;
   hackAlerts: { team: Team; serverId: number; at: number }[];
 }
 
@@ -85,6 +89,7 @@ export type ServerToClient =
   | { t: 'weaponSaved'; report: BudgetReport; ok: boolean; error?: string; id?: string }
   | { t: 'shot'; shooterId: number; from: Vec3; to: Vec3; weapon: string }
   | { t: 'hit'; targetId: number; dmg: number }
+  | { t: 'explosion'; pos: Vec3; radius: number }
   | { t: 'died'; id: number; killerId: number }
   | { t: 'terminalOpened'; serverId: number; source: string; vulnTypeHint: string }
   | { t: 'exploitResult'; serverId: number; ok: boolean; log: string[] }

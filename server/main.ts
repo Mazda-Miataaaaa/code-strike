@@ -12,9 +12,13 @@ import type { ClientToServer, Team } from '../shared/protocol.js';
 import balance from '../config/balance.json' with { type: 'json' };
 
 const PORT = Number(process.env.PORT ?? 8090);
+const BOTS_ON = process.env.BOTS !== '0';
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../public');
 
 setBudgetConfig(balance as unknown as BudgetConfig);
+
+process.on('unhandledRejection', (e) => console.error('unhandledRejection', e));
+process.on('uncaughtException', (e) => console.error('uncaughtException', e));
 
 const sandbox = new LuaSandbox();
 const match = new Match(sandbox, matchConfig);
@@ -35,7 +39,7 @@ const httpServer = createServer((req, res) => {
   res.end(readFileSync(full));
 });
 
-const wss = new WebSocketServer({ server: httpServer });
+const wss = new WebSocketServer({ server: httpServer, maxPayload: 64 * 1024 });
 const clients = new Map<WebSocket, { id: number }>();
 
 function broadcast(msg: unknown) {
@@ -50,76 +54,82 @@ wss.on('connection', (ws) => {
   ws.on('message', async (data) => {
     let msg: ClientToServer;
     try { msg = JSON.parse(String(data)); } catch { return; }
-    if (msg.t === 'join') {
-      const team: Team = msg.team ?? (match.players.size % 2 === 0 ? 'red' : 'blue');
-      const p = match.addPlayer(msg.name.slice(0, 16) || 'player', team, false);
-      playerId = p.id;
-      clients.set(ws, { id: p.id });
-      ws.send(JSON.stringify({
-        t: 'joined', youId: p.id, state: match.state(),
-        templates: WEAPON_TEMPLATES,
-        config: { budget: (balance as any).budget, match: (balance as any).match },
-      }));
-      return;
-    }
-    if (!playerId) return;
-    switch (msg.t) {
-      case 'input':
-        match.input(playerId, msg);
-        break;
-      case 'saveWeapon': {
-        const r = await match.saveWeapon(playerId, msg.code);
-        ws.send(JSON.stringify({ t: 'weaponSaved', ok: r.ok, error: r.error, report: r.points !== undefined ? { ok: r.ok, total: r.points, rows: [] } : undefined }));
-        break;
-      }
-      case 'openTerminal': {
-        const ok = match.openTerminal(playerId, msg.serverId);
-        const svc = ok ? match.getServices().get(msg.serverId) : undefined;
+    if (!msg || typeof (msg as any).t !== 'string') return;
+    try {
+      if (msg.t === 'join') {
+        if (playerId) return;
+        const team: Team = msg.team === 'red' || msg.team === 'blue' ? msg.team : match.pickTeam();
+        const p = match.addPlayer(String(msg.name ?? '').slice(0, 16) || 'player', team, false);
+        playerId = p.id;
+        clients.set(ws, { id: p.id });
+        if (BOTS_ON) match.rebalanceBots();
         ws.send(JSON.stringify({
-          t: 'terminalOpened', serverId: msg.serverId,
-          source: svc?.displayedSource ?? '', vulnTypeHint: svc?.vulnTypeHint ?? '',
+          t: 'joined', youId: p.id, state: match.state(),
+          templates: WEAPON_TEMPLATES,
+          config: { budget: (balance as any).budget, match: (balance as any).match },
         }));
-        break;
+        return;
       }
-      case 'closeTerminal':
-        match.closeTerminal(playerId);
-        break;
-      case 'submitExploit': {
-        const r = await match.submitExploit(playerId, msg.serverId, msg.code);
-        ws.send(JSON.stringify({ t: 'exploitResult', serverId: msg.serverId, ok: r.ok, log: r.log }));
-        break;
+      if (!playerId) return;
+      switch (msg.t) {
+        case 'input':
+          match.input(playerId, msg);
+          break;
+        case 'saveWeapon': {
+          const r = await match.saveWeapon(playerId, msg.code);
+          ws.send(JSON.stringify({ t: 'weaponSaved', ok: r.ok, error: r.error, report: r.points !== undefined ? { ok: r.ok, total: r.points, rows: [] } : undefined }));
+          break;
+        }
+        case 'openTerminal': {
+          const ok = match.openTerminal(playerId, msg.serverId);
+          const svc = ok ? match.getServices().get(msg.serverId) : undefined;
+          ws.send(JSON.stringify({
+            t: 'terminalOpened', serverId: msg.serverId,
+            source: svc?.displayedSource ?? '', vulnTypeHint: svc?.vulnTypeHint ?? '',
+          }));
+          break;
+        }
+        case 'closeTerminal':
+          match.closeTerminal(playerId);
+          break;
+        case 'submitExploit': {
+          const r = await match.submitExploit(playerId, msg.serverId, msg.code);
+          ws.send(JSON.stringify({ t: 'exploitResult', serverId: msg.serverId, ok: r.ok, log: r.log }));
+          break;
+        }
+        case 'submitPatch': {
+          const r = await match.submitPatch(playerId, msg.serverId, msg.code);
+          ws.send(JSON.stringify({ t: 'patchResult', serverId: msg.serverId, ok: r.accepted, log: r.log, accepted: r.accepted }));
+          break;
+        }
       }
-      case 'submitPatch': {
-        const r = await match.submitPatch(playerId, msg.serverId, msg.code);
-        ws.send(JSON.stringify({ t: 'patchResult', serverId: msg.serverId, ok: r.accepted, log: r.log, accepted: r.accepted }));
-        break;
-      }
+    } catch (e) {
+      console.error('message handler error', e);
     }
   });
   ws.on('close', () => {
     if (playerId) match.removePlayer(playerId);
     clients.delete(ws);
+    if (BOTS_ON) match.rebalanceBots();
   });
 });
 
 let lastTick = Date.now();
 setInterval(() => {
-  const now = Date.now();
-  const dt = now - lastTick;
-  lastTick = now;
-  match.tick(dt);
-  const events = match.takeEvents();
-  for (const ev of events) broadcast(ev);
-  broadcast({ t: 'state', state: match.state() });
+  try {
+    const now = Date.now();
+    const dt = now - lastTick;
+    lastTick = now;
+    match.tick(dt);
+    const events = match.takeEvents();
+    for (const ev of events) broadcast(ev);
+    broadcast({ t: 'state', state: match.state() });
+  } catch (e) {
+    console.error('tick error', e);
+  }
 }, 1000 / 20);
 
-if (process.env.BOTS !== '0') {
-  match.addPlayer('Bot-Rex', 'red', true);
-  match.addPlayer('Bot-Vox', 'blue', true);
-  if (match.players.size < 4) {
-    match.addPlayer('Bot-Zed', 'blue', true);
-  }
-}
+if (BOTS_ON) match.rebalanceBots();
 match.startPrep();
 
 httpServer.listen(PORT, () => {
