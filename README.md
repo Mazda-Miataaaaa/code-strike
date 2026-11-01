@@ -1,112 +1,164 @@
 # CODE-STRIKE
 
-A team-based FPS in the spirit of Counter-Strike, with one twist: **weapons are not purchased — they are programmed**. A round is won by eliminating the enemy team **or** by hacking two servers on the map with code.
+**Командный шутер от первого лица, где оружие не покупают, а программируют.**
 
-**MVP status:** 2v2 with bots, one symmetric map, 2 vulnerability classes, weapon/exploit/patch editors, full round loop.
+Текущая версия: **0.0.1** (ранняя, играбельная, но сырая).
+
+*English: a team FPS in the spirit of Counter-Strike where weapons are written as Lua scripts and a round can also be won by hacking two servers with code. TypeScript, Node.js server, three.js client.*
 
 ---
 
-## Engine choice (and why not Godot 4)
+## Что это за игра
 
-The task allows a justified alternative to Godot 4. This MVP uses **TypeScript + Node.js (authoritative server) + three.js (browser client) + Lua-in-WASM (wasmoon)**:
+CODE-STRIKE похожа на Counter-Strike: две команды (красные и синие) по 2 игрока, раунды, стрельба. Но есть две особенности:
 
-- The core of the game — the Lua sandbox, the weapon DSL, the vulnerable services, the match loop — must be **verifiable by automated tests in CI**. A headless Node server lets all 12 tests (including "infinite loop gets killed" and "full match from spawn to victory") run without a GUI runtime.
-- Lua scripting requires a real embedded VM with an instruction budget. `wasmoon` compiles Lua 5.4 to WASM and runs it in a dedicated worker thread that is **terminated and respawned** when a script exceeds its budget — a hard kill that cannot be escaped.
-- The client is a thin renderer: the server computes every shot and every hack; the client only sends input and draws pre-computed events. This is anti-cheat by design and matches the task's networking requirements.
+1. **Оружие пишется кодом.** Перед раундом ты пишешь скрипт на Lua, который описывает твоё оружие: урон, скорострельность, магазин, перезарядку, разброс, взрыв и даже сколько у тебя здоровья. На всё есть бюджет в 100 очков, поэтому сделать «и сильно, и быстро, и с большим здоровьем» нельзя.
+2. **Раунд можно выиграть взломом.** На карте стоят два игровых сервера. Если твоя команда взломает оба, раунд за вами. Для этого нужно подойти к серверу и написать эксплойт на Lua. Защитники пишут патч.
 
-Porting the gameplay layer to Godot later is straightforward: the shared protocol (`shared/protocol.ts`) and the Lua sandbox contract are engine-agnostic.
+Матч идёт до **5 выигранных раундов**. Раунд выигрывает команда, которая уничтожила врагов или взломала оба сервера. Если время вышло, побеждает команда с большим числом живых игроков, затем с большим запасом здоровья.
 
-## Architecture
+## Как скачать
 
-```
-client/            three.js renderer + editors (weapon / exploit / patch), sends input only
-public/            static client bundle (esbuild output + index.html)
-server/
-  main.ts          WebSocket server, static files, bot spawning, 20 Hz tick
-  game/
-    match.ts       match state machine: phases, players, shots, respawn, victory
-    map.ts         symmetric map: walls, spawns, raycasting (slab), collision
-    config.ts      typed access to config/balance.json
-  services/
-    vulnService.ts in-game servers with a readable Lua source, exploit runner, patch self-check
-  sandbox/
-    pool.ts        Lua sandbox host: worker lifecycle, instruction budget, kill & respawn
-    worker.mjs     wasmoon (Lua 5.4 in WASM) worker; os/io/package/debug removed
-shared/
-  protocol.ts      wire protocol (ClientToServer / ServerToClient), WeaponSpec
-  budget.ts        spec validation + point-budget calculator
-  templates.ts     starter weapon templates (AK, AWP, SMG, Cannon)
-config/
-  balance.json     ALL tunables: budget, costs, match timing, sandbox limits
-test/              12 automated tests (sandbox, budget, services, full match)
+Способы на выбор:
+
+- **Из релизов:** открой вкладку **Releases** на странице репозитория и скачай архив последней версии.
+- **ZIP:** на странице репозитория нажми зелёную кнопку **Code**, затем **Download ZIP**, и распакуй архив.
+- **Через git:**
+  ```bash
+  git clone https://github.com/Mazda-Miataaaaa/code-strike.git
+  cd code-strike
+  ```
+
+## Как запустить
+
+Нужен [Node.js](https://nodejs.org) версии 20 или новее. Больше ничего ставить не надо.
+
+В папке с игрой выполни:
+
+```bash
+npm install
+npm run dev
 ```
 
-### Round flow
+Первая команда скачивает библиотеки, вторая собирает игру и запускает сервер на порту **8090**. Потом открой в браузере:
 
-1. **Prep (75 s)** — both teams open terminals, read the server source, write weapon scripts and defense patches. Patches deploy after passing a self-check (legitimate logins must keep working).
-2. **Live (240 s)** — FPS gameplay. Open a terminal to hack (you are defenseless while coding — your team covers you). Exploits run server-side against the real Lua service; success marks the server hacked. Hack **both** servers or eliminate the enemy team to win.
-3. **End** — victory screen with scoreboard.
+```
+http://localhost:8090
+```
 
-## Weapon DSL
+Введи ник и нажми **Join**. Боты появятся сами. Пока окно терминала открыто, сервер работает.
 
-A weapon is a Lua script that returns a table:
+Чтобы играть без ботов, запусти сервер так (Linux/macOS): `BOTS=0 npm start`. В Windows PowerShell: `$env:BOTS="0"; npm start`.
+
+## Как играть с друзьями
+
+### В одной сети (Wi-Fi или кабель)
+
+1. Один человек запускает сервер, как описано выше.
+2. Он узнаёт свой локальный IP-адрес. В Windows: команда `ipconfig`, строка IPv4. В Linux/macOS: `ip a` или `ifconfig`.
+3. Остальные открывают в браузере `http://ЕГО_IP:8090`, например `http://192.168.1.15:8090`.
+4. Если Windows спросит про доступ Node.js к сети, нужно разрешить.
+
+На каждую команду приходится по 2 места. Свободные места занимают боты, а когда заходит живой игрок, один бот уходит.
+
+### Через интернет
+
+Просто так через интернет не получится: нужно либо пробросить порт 8090 на роутере, либо воспользоваться программой-туннелем, либо запустить сервер на облачной машине. Это отдельная настройка, и в версии 0.0.1 она не описана подробно.
+
+## Управление
+
+| Клавиша | Действие |
+|---|---|
+| W A S D | ходить |
+| Мышь | поворот камеры (клик по экрану захватывает мышь) |
+| Левая кнопка мыши | стрелять |
+| Tab | редактор оружия |
+| E | открыть терминал сервера (нужно стоять рядом) |
+| Esc | закрыть редактор или терминал |
+| M | включить и выключить звук |
+
+## Ход раунда
+
+1. **Подготовка (по умолчанию 75 с).** Все стоят на месте. Нажми **Tab**, выбери шаблон (AK, AWP, SMG, Cannon) или напиши своё оружие и нажми **save & equip**. Защитники могут сразу писать патчи.
+2. **Бой (по умолчанию 240 с).** Играй в шутер. Чтобы взломать сервер, подойди к нему и нажми **E**. Пока пишешь код, ты беззащитен, поэтому команда должна тебя прикрывать.
+3. **Конец раунда.** Показывается экран победы и таблица. Через 15 секунд начинается следующий раунд. После 5 побед команды матч заканчивается, счёт обнуляется и начинается новый.
+
+## Оружие
+
+Оружие это Lua-скрипт, который возвращает таблицу:
 
 ```lua
 return {
   name = "AK",
-  hp = 100,             -- your character's HP is part of the budget!
+  hp = 100,
   damage = 15,
   fireIntervalMs = 100,
   hitscan = true,
-  projectileSpeed = 200,  -- only for hitscan = false
+  projectileSpeed = 200,
   magazine = 30,
   reloadMs = 2000,
   recoil = 0.6,
   spreadDeg = 2.0,
   knockback = 0.2,
-  slow = 0,               -- seconds of slow on hit
-  aoeRadius = 0,          -- splash damage
+  slow = 0,
+  aoeRadius = 0,
   aoeDamageFalloff = 0.5,
 }
 ```
 
-**Point budget:** every parameter costs points (see `config/balance.json`); the total must not exceed 100. Want a one-shot weapon? Take 20 HP and a 4-second reload. The editor refuses to save scripts over budget. All costs and limits live in the config — no rebuild needed to retune.
+Каждый параметр стоит очков, всего можно потратить 100. Хочешь оружие, которое убивает с одного выстрела? Возьми поменьше здоровья и подольше перезарядку. Редактор не даст сохранить скрипт, если бюджет превышен. Все цены хранятся в `config/balance.json`.
 
-**Sandbox guarantees:** scripts run in an isolated WASM Lua VM inside a dedicated worker, with `os`/`io`/`package`/`debug` removed and no access to the world beyond the exposed table contract. A script that exceeds the instruction budget (e.g. `while true do end`) is killed — the worker is terminated and respawned — and the server keeps running. Shot and hack results are computed only on the server.
+Если `hitscan = false`, выстрел летит снарядом. Снаряд взрывается при попадании в игрока или стену и наносит урон по площади (`aoeRadius`).
 
-## Hacking
+## Взлом серверов
 
-Two vulnerability classes in the auth service (readable at the terminal):
+У сервера две уязвимости:
 
-- **SQL injection** — `login()` builds its query with raw string concatenation (`".. user .."`).
-- **Missing rate limit** — `checkPin()` counts attempts but never limits them.
+- **SQL-инъекция** в функции `login()`: запрос собирается склейкой строк.
+- **Нет ограничения попыток** в `checkPin()`: пин можно перебирать.
 
-Attackers write an exploit that calls the service functions and triggers the flaw. Defenders write a patch defining `validate(s)` and/or `rate(key)`; the patch is wrapped around the service and must pass a self-check (legitimate `admin`/`guest` logins still work) or it is rejected. A correct patch blocks both exploit types.
+Атакующий пишет эксплойт на Lua, который вызывает функции сервиса и использует уязвимость. Защитник пишет патч с функциями `validate(s)` и `rate(key)`. Патч должен пройти самопроверку: настоящий вход `admin` и `guest` обязан продолжать работать, иначе патч отклоняется. Весь код выполняется на сервере в изолированной песочнице, поэтому бесконечный цикл не повесит игру.
 
-## Running
+## Настройка
 
-Requirements: Node.js ≥ 20.
+Почти все числа игры лежат в `config/balance.json`: бюджет оружия и цены, длительность фаз, скорость игрока, пределы песочницы, поведение ботов. После изменения нужно перезапустить сервер.
 
-```bash
-npm install
-npm run dev        # build server + client, then start on :8090
-```
-
-Open `http://localhost:8090`, enter a nickname, join. Bots spawn automatically (`BOTS=0 npm start` to disable).
-
-Tests:
+Тесты:
 
 ```bash
 npm run build
 npm test
 ```
 
-Configuration lives in `config/balance.json` (budget costs, phase durations, sandbox limits, movement speed).
+## Как устроен проект
 
-## Later (out of MVP scope)
+```
+client/    клиент (three.js): рисует мир, звук, редакторы кода
+server/    сервер (Node.js): правила, боты, физика, взлом, песочница Lua
+shared/    общий протокол и расчёт бюджета оружия
+config/    balance.json с настройками
+test/      автоматические тесты
+public/    собранный клиент
+```
 
-- More vulnerability types (buffer overflow, race condition, deserialization)
-- More maps, skins, matchmaking, 5v5
-- Lua debug hooks for per-instruction accounting (currently a hard wall-clock budget on a dedicated worker)
-- Client-side prediction and lag compensation
-- Honeypot services alerting the defense
+Сервер авторитетный: он сам считает каждый выстрел и каждый взлом, а клиент только отправляет ввод и рисует результат. Это защищает от читов.
+
+## Ограничения версии 0.0.1
+
+- Одна карта (60 на 60), симметричная.
+- Боты умеют ходить, обходить стены и стрелять, но **не умеют взламывать серверы**.
+- Модели простые (капсулы и кубы), звук синтезируется кодом.
+- Игра через интернет требует ручной настройки сети.
+- Автоматические тесты после последних изменений автором не запускались. Если что-то не работает, открой Issue.
+
+## Планы
+
+- Больше типов уязвимостей (переполнение буфера, гонки, десериализация)
+- Больше карт и режимов, 5 на 5
+- Боты, которые взламывают серверы
+- Нормальные модели и записанные звуки
+- Более точная работа с задержкой в сети
+
+## Лицензия
+
+Смотри файл `LICENSE`.
