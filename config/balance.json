@@ -1,0 +1,44 @@
+{
+  "budget": {
+    "totalPoints": 100,
+    "minHp": 20,
+    "maxHp": 100,
+    "costs": {
+      "hpPer100": 35,
+      "damagePerPoint": 0.35,
+      "fireRatePerShotPerSec": 1.8,
+      "hitscanFlat": 6,
+      "projectileSpeedPerUnit": 0.05,
+      "magazinePerRound": 0.5,
+      "reloadCreditAt2000ms": 2,
+      "recoilRefundAt1_5": 8,
+      "spreadRefundAt4deg": 1.5,
+      "knockback": 0.8,
+      "slow": 5,
+      "aoeRadiusPerUnit": 1.5
+    }
+  },
+  "sandbox": {
+    "scriptTimeoutMs": 1000,
+    "warmupTimeoutMs": 5000
+  },
+  "match": {
+    "playersPerTeam": 2,
+    "prepSeconds": 75,
+    "roundSeconds": 240,
+    "hackCountdownSeconds": 10,
+    "serversToHack": 2,
+    "respawnSeconds": 5,
+    "playerSpeed": 5.2,
+    "playerRadius": 0.4,
+    "playerEye": 1.6,
+    "botAimErrorDeg": 4,
+    "botReactionMs": 400
+  },
+  "hack": {
+    "pinLength": 4,
+    "pinMaxUnlimitedAttempts": true,
+    "maxServiceCalls": 20000,
+    "rateLimitDefaultAttempts": 5
+  }
+}

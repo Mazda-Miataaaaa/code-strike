@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>code-strike</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #10131a; color: #d8dee9; font-family: 'Segoe UI', system-ui, sans-serif; }
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; }
+  #hud { position: fixed; inset: 0; pointer-events: none; }
+  #hud .panel { position: absolute; background: rgba(13,17,25,.82); border: 1px solid #2d3648; border-radius: 8px; padding: 10px 14px; }
+  #phase { top: 12px; left: 50%; transform: translateX(-50%); font-size: 18px; font-weight: 600; }
+  #score { top: 12px; left: 12px; font-size: 16px; }
+  #score .red { color: #ff6b6b; } #score .blue { color: #5ab0ff; }
+  #health { bottom: 16px; left: 12px; font-size: 20px; }
+  #health .bar { width: 220px; height: 10px; background: #222b3a; border-radius: 5px; margin-top: 4px; }
+  #health .bar > div { height: 100%; background: #46d68c; border-radius: 5px; }
+  #weapon { bottom: 16px; right: 12px; text-align: right; font-size: 15px; }
+  #serversbox { bottom: 90px; left: 12px; font-size: 13px; }
+  .server { margin: 2px 0; }
+  .server.hacked { color: #ff6b6b; }
+  .server.secure { color: #46d68c; }
+  #alert { top: 60px; left: 50%; transform: translateX(-50%); color: #ff6b6b; font-size: 15px; }
+  #crosshair { top: 50%; left: 50%; width: 4px; height: 4px; background: #d8dee9; border-radius: 50%; margin: -2px; position: absolute; }
+  #editor { position: fixed; inset: 6% 12%; background: #0d1119; border: 1px solid #2d3648; border-radius: 10px; display: none; flex-direction: column; pointer-events: auto; z-index: 30; }
+  #editor header { padding: 10px 16px; border-bottom: 1px solid #2d3648; display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
+  #editor .body { display: flex; flex: 1; min-height: 0; }
+  #editor textarea { flex: 1; background: #0a0e16; color: #9ecbff; border: none; resize: none; padding: 12px; font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 13px; line-height: 1.5; }
+  #editor .side { width: 280px; border-left: 1px solid #2d3648; padding: 12px; overflow-y: auto; font-size: 12px; }
+  #editor footer { padding: 10px 16px; border-top: 1px solid #2d3648; display: flex; gap: 10px; align-items: center; }
+  #editor footer .budget { font-size: 13px; margin-left: auto; }
+  button { background: #2b6cb0; border: none; color: #fff; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  button:hover { background: #3785c9; }
+  button.ghost { background: #232c3d; }
+  button.ghost:hover { background: #303b50; }
+  #sourcebox { position: fixed; left: 12px; top: 60px; width: 380px; max-height: 50vh; overflow: auto; background: rgba(13,17,25,.94); border: 1px solid #2d3648; border-radius: 8px; padding: 12px; display: none; pointer-events: auto; z-index: 25; font-family: 'Consolas', monospace; font-size: 12px; white-space: pre; }
+  #log { bottom: 90px; right: 12px; font-size: 12px; max-width: 320px; }
+  #menu { position: fixed; inset: 0; background: #0d1119; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 50; }
+  #menu h1 { font-size: 42px; margin-bottom: 4px; letter-spacing: 2px; }
+  #menu p.sub { color: #7f8ba3; margin-top: 0; }
+  #menu input { padding: 10px 14px; font-size: 16px; border-radius: 6px; border: 1px solid #2d3648; background: #161c29; color: #d8dee9; margin: 12px; width: 240px; }
+  #winner { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(8,10,16,.9); z-index: 40; flex-direction: column; }
+  #winner .t { font-size: 44px; font-weight: 700; }
+  table.board { border-collapse: collapse; margin-top: 16px; font-size: 14px; }
+  table.board td, table.board th { border: 1px solid #2d3648; padding: 5px 12px; text-align: left; }
+  .red { color: #ff6b6b; } .blue { color: #5ab0ff; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="hud">
+  <div class="panel" id="phase">lobby</div>
+  <div class="panel" id="score"><span class="red">RED 0</span> : <span class="blue">0 BLUE</span></div>
+  <div id="alert"></div>
+  <div class="panel" id="health">HP <span id="hpval">100</span><div class="bar"><div id="hpbar" style="width:100%"></div></div></div>
+  <div class="panel" id="weapon"><div id="wname">SMG</div><div id="wammo">25 / 25</div></div>
+  <div class="panel" id="serversbox"></div>
+  <div class="panel" id="log"></div>
+  <div id="crosshair"></div>
+</div>
+<div id="sourcebox"></div>
+<div id="editor">
+  <header><span id="ed-title">weapon editor</span><span id="ed-budget" style="color:#7f8ba3;font-size:13px"></span></header>
+  <div class="body"><textarea id="ed-code" spellcheck="false"></textarea><div class="side" id="ed-help"></div></div>
+  <footer><button id="ed-save">save &amp; equip</button><button id="ed-close" class="ghost">close</button><div class="budget" id="ed-budgetline"></div></footer>
+</div>
+<div id="winner"><div class="t" id="winner-text"></div><table class="board" id="board"></table></div>
+<div id="menu">
+  <h1>CODE-STRIKE</h1>
+  <p class="sub">weapons are programmed, not purchased</p>
+  <input id="name" placeholder="nickname" value="player">
+  <button id="join">join match</button>
+  <p style="color:#7f8ba3;font-size:13px;max-width:460px;text-align:center">
+    WASD move · mouse look · click shoot · E open terminal (near a server) ·
+    Tab weapon editor · Esc close<br>
+    Hack both servers with code, or eliminate the enemy team.
+  </p>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
