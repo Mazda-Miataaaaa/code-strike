@@ -20,6 +20,7 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x10131a);
 scene.fog = new THREE.Fog(0x10131a, 40, 110);
 const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.05, 250);
+camera.rotation.order = 'YXZ';
 scene.add(camera);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(innerWidth, innerHeight);
@@ -32,6 +33,51 @@ scene.add(dir);
 
 let mapGroup: THREE.Group | null = null;
 
+interface ServerViz {
+  beamMat: THREE.MeshBasicMaterial;
+  screenMat: THREE.MeshBasicMaterial;
+  light: THREE.PointLight;
+  canvas: HTMLCanvasElement;
+  tex: THREE.CanvasTexture;
+  hacked: boolean | null;
+}
+const serverViz = new Map<number, ServerViz>();
+
+function drawLabel(v: ServerViz, id: number, hacked: boolean) {
+  const c = v.canvas.getContext('2d')!;
+  const color = hacked ? '#ff4d4d' : '#3dff9a';
+  c.clearRect(0, 0, 256, 64);
+  c.fillStyle = 'rgba(8,12,18,0.8)';
+  c.fillRect(0, 0, 256, 64);
+  c.strokeStyle = color;
+  c.lineWidth = 4;
+  c.strokeRect(2, 2, 252, 60);
+  c.fillStyle = color;
+  c.font = 'bold 22px monospace';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillText(`SERVER ${id} ${hacked ? 'HACKED' : 'ONLINE'}`, 128, 33);
+  v.tex.needsUpdate = true;
+}
+
+function updateServerViz(now: number) {
+  if (!state) return;
+  for (const s of state.servers) {
+    const v = serverViz.get(s.id);
+    if (!v) continue;
+    if (v.hacked !== s.hacked) {
+      const col = s.hacked ? 0xff4d4d : 0x3dff9a;
+      v.beamMat.color.setHex(col);
+      v.screenMat.color.setHex(col);
+      v.light.color.setHex(col);
+      drawLabel(v, s.id, s.hacked);
+      v.hacked = s.hacked;
+    }
+    const speed = s.hacked ? 90 : 300;
+    v.beamMat.opacity = 0.2 + 0.12 * Math.sin(now / speed);
+  }
+}
+
 function buildMap(map: any) {
   if (mapGroup) {
     scene.remove(mapGroup);
@@ -40,6 +86,7 @@ function buildMap(map: any) {
       if (m.geometry) m.geometry.dispose();
     });
   }
+  serverViz.clear();
   const g = new THREE.Group();
   const size: number = map?.size ?? 40;
   const floor = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshLambertMaterial({ color: 0x1b2130 }));
@@ -59,9 +106,42 @@ function buildMap(map: any) {
     g.add(mesh);
   }
   for (const t of map?.terminals ?? []) {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1.8, 0.6), new THREE.MeshLambertMaterial({ color: 0x0e6b4f }));
-    m.position.set(t.pos.x, 0.9, t.pos.z);
-    g.add(m);
+    const grp = new THREE.Group();
+    grp.position.set(t.pos.x, 0, t.pos.z);
+    const rack = new THREE.Mesh(new THREE.BoxGeometry(1.2, 2.2, 0.8), new THREE.MeshLambertMaterial({ color: 0x1a1f2b }));
+    rack.position.y = 1.1;
+    grp.add(rack);
+    const screenMat = new THREE.MeshBasicMaterial({ color: 0x3dff9a });
+    const screenA = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.6), screenMat);
+    screenA.position.set(0, 1.5, 0.41);
+    grp.add(screenA);
+    const screenB = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.6), screenMat);
+    screenB.position.set(0, 1.5, -0.41);
+    screenB.rotation.y = Math.PI;
+    grp.add(screenB);
+    const beamMat = new THREE.MeshBasicMaterial({
+      color: 0x3dff9a, transparent: true, opacity: 0.25, depthWrite: false,
+      side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+    });
+    const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 14, 16, 1, true), beamMat);
+    beam.position.y = 7;
+    grp.add(beam);
+    const light = new THREE.PointLight(0x3dff9a, 1.5, 12);
+    light.position.y = 2.6;
+    grp.add(light);
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 64;
+    const tex = new THREE.CanvasTexture(canvas);
+    const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+    label.scale.set(4, 1, 1);
+    label.position.y = 3.4;
+    label.renderOrder = 10;
+    grp.add(label);
+    const viz: ServerViz = { beamMat, screenMat, light, canvas, tex, hacked: null };
+    drawLabel(viz, t.serverId, false);
+    serverViz.set(t.serverId, viz);
+    g.add(grp);
   }
   scene.add(g);
   mapGroup = g;
@@ -243,7 +323,7 @@ function renderState() {
   const phase = $('phase');
   const remain = Math.max(0, Math.ceil((state.phaseEndsAt - Date.now()) / 1000));
   phase.textContent = `${state.phase} ${remain}s`;
-  $('score').innerHTML = `<span class="red">RED ${state.score.red}</span> : <span class="blue">${state.score.blue} BLUE</span>`;
+  $('score').innerHTML = `<span class="red">RED ${state.score.red}</span> : <span class="blue">${state.score.blue} BLUE</span> <small>(first to ${state.roundsToWin})</small>`;
 
   const you = state.players.find((p) => p.id === youId);
   if (you) {
@@ -252,9 +332,6 @@ function renderState() {
     $('wname').textContent = you.weaponName;
     $('wammo').textContent = `${you.ammo}/${you.magazine}`;
     camera.position.set(you.pos.x, 1.6, you.pos.z);
-    camera.rotation.order = 'YXZ';
-    camera.rotation.y = you.yaw + Math.PI;
-    camera.rotation.x = pitch;
     if (you.weaponName !== gunName) setGun(you.weaponName);
     gunRoot.visible = you.alive && $('editor').style.display !== 'flex';
   }
@@ -284,7 +361,11 @@ function renderState() {
 
   if (state.phase === 'ended' && state.winner) {
     $('winner').style.display = 'flex';
-    $('winner-text').innerHTML = `<span class="${state.winner}">${state.winner.toUpperCase()} WINS</span> by ${state.winReason}`;
+    if (state.matchWinner) {
+      $('winner-text').innerHTML = `<span class="${state.matchWinner}">${state.matchWinner.toUpperCase()} WINS THE MATCH</span> ${state.score.red}:${state.score.blue}<br><small>new match starts soon</small>`;
+    } else {
+      $('winner-text').innerHTML = `<span class="${state.winner}">${state.winner.toUpperCase()} WINS</span> by ${state.winReason}`;
+    }
     $('board').innerHTML =
       '<tr><th>player</th><th>team</th><th>kills</th><th>deaths</th><th>hacks</th></tr>' +
       state.players.map((p) =>
@@ -492,6 +573,9 @@ function animate() {
   const now = performance.now();
   const dtSec = Math.min(0.1, (now - lastFrame) / 1000);
   lastFrame = now;
+  camera.rotation.y = yaw + Math.PI;
+  camera.rotation.x = pitch;
+  updateServerViz(now);
   for (let i = TRACERS.length - 1; i >= 0; i--) {
     if (now > TRACERS[i].until) {
       scene.remove(TRACERS[i].line);

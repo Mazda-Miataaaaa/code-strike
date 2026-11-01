@@ -76,6 +76,8 @@ export interface MatchState {
   phase: Phase;
   phaseEndsAt: number;
   score: { red: number; blue: number };
+  roundsToWin: number;
+  matchWinner: Team | null;
   players: PlayerState[];
   servers: ServerStateMap[];
   winner: Team | null;

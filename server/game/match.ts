@@ -7,6 +7,7 @@ import { WEAPON_TEMPLATES } from '../../shared/templates.js';
 import type { MatchConfig } from './config.js';
 
 const BOT_NAMES = ['Bot-Rex', 'Bot-Vox', 'Bot-Zed', 'Bot-Nyx', 'Bot-Ace', 'Bot-Kai'];
+const ROUNDS_TO_WIN = 5;
 
 function angleDiff(a: number, b: number): number {
   let d = (b - a) % (Math.PI * 2);
@@ -51,6 +52,7 @@ export class Match {
   phase: 'lobby' | 'prep' | 'live' | 'ended' = 'lobby';
   phaseEndsAt = 0;
   score = { red: 0, blue: 0 };
+  matchWinner: Team | null = null;
   winner: Team | null = null;
   winReason: WinReason | null = null;
   hackAlerts: { team: Team; serverId: number; at: number }[] = [];
@@ -202,16 +204,22 @@ export class Match {
   input(playerId: number, msg: Extract<ClientToServer, { t: 'input' }>) {
     const p = this.players.get(playerId);
     if (!p || !p.alive || this.phase !== 'live') return;
-    const speed = this.cfg.playerSpeed * (Date.now() < p.slowUntil ? 0.5 : 1);
-    const dt = Math.min(msg.dt, 0.1);
     if (p.terminal !== null) return;
-    const dirx = Math.sin(msg.yaw);
-    const dirz = Math.cos(msg.yaw);
-    const nx = p.pos.x + (msg.move.x * dirz - msg.move.z * dirx) * speed * dt;
-    const nz = p.pos.z + (msg.move.x * -dirx + msg.move.z * -dirz) * -speed * dt;
+    const speed = this.cfg.playerSpeed * (Date.now() < p.slowUntil ? 0.5 : 1);
+    const dt = Math.max(0, Math.min(Number(msg.dt) || 0, 0.1));
+    let mx = Math.max(-1, Math.min(1, Number(msg.move?.x) || 0));
+    let mz = Math.max(-1, Math.min(1, Number(msg.move?.z) || 0));
+    const ml = Math.hypot(mx, mz);
+    if (ml > 1) { mx /= ml; mz /= ml; }
+    const yaw = Number.isFinite(msg.yaw) ? msg.yaw : p.yaw;
+    const pitch = Number.isFinite(msg.pitch) ? Math.max(-1.2, Math.min(1.2, msg.pitch)) : 0;
+    const sy = Math.sin(yaw);
+    const cy = Math.cos(yaw);
+    const nx = p.pos.x + (mz * sy - mx * cy) * speed * dt;
+    const nz = p.pos.z + (mz * cy + mx * sy) * speed * dt;
     p.pos = collide({ x: nx, y: 0, z: nz }, this.map, this.cfg.playerRadius);
-    p.yaw = msg.yaw;
-    if (msg.shoot) this.tryShoot(p, msg.pitch);
+    p.yaw = yaw;
+    if (msg.shoot) this.tryShoot(p, pitch);
   }
 
   private tryShoot(p: PlayerHandle, pitch: number) {
@@ -335,7 +343,22 @@ export class Match {
     this.winner = winner;
     this.winReason = reason;
     this.score[winner]++;
-    this.phaseEndsAt = Date.now() + 15000;
+    if (this.score[winner] >= ROUNDS_TO_WIN) {
+      this.matchWinner = winner;
+      this.phaseEndsAt = Date.now() + 20000;
+    } else {
+      this.phaseEndsAt = Date.now() + 15000;
+    }
+  }
+
+  private resetMatch() {
+    this.score = { red: 0, blue: 0 };
+    this.matchWinner = null;
+    for (const p of this.players.values()) {
+      p.kills = 0;
+      p.deaths = 0;
+      p.hacks = 0;
+    }
   }
 
   startPrep() {
@@ -373,7 +396,10 @@ export class Match {
     const now = Date.now();
     if (this.phase === 'prep' && now > this.phaseEndsAt) this.startLive();
     if (this.phase === 'live' && now > this.phaseEndsAt) this.endRound(this.timeoutWinner(), 'timeout');
-    if (this.phase === 'ended' && now > this.phaseEndsAt) this.startPrep();
+    if (this.phase === 'ended' && now > this.phaseEndsAt) {
+      if (this.matchWinner) this.resetMatch();
+      this.startPrep();
+    }
 
     for (const p of this.players.values()) {
       if (!p.alive && this.phase === 'live' && now > p.respawnAt) {
@@ -430,7 +456,7 @@ export class Match {
 
   private botStep(p: PlayerHandle, fwd: number, strafe: number, step: number) {
     const fx = Math.sin(p.yaw), fz = Math.cos(p.yaw);
-    const rx = Math.cos(p.yaw), rz = -Math.sin(p.yaw);
+    const rx = -Math.cos(p.yaw), rz = Math.sin(p.yaw);
     let vx = fx * fwd + rx * strafe;
     let vz = fz * fwd + rz * strafe;
     const l = Math.hypot(vx, vz);
@@ -519,6 +545,8 @@ export class Match {
       phase: this.phase,
       phaseEndsAt: this.phaseEndsAt,
       score: this.score,
+      roundsToWin: ROUNDS_TO_WIN,
+      matchWinner: this.matchWinner,
       players,
       servers,
       winner: this.winner,
