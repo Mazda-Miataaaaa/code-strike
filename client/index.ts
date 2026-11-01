@@ -18,8 +18,9 @@ const EXPLOSIONS: { mesh: THREE.Mesh; start: number; dur: number; radius: number
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x10131a);
-scene.fog = new THREE.Fog(0x10131a, 30, 80);
-const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 200);
+scene.fog = new THREE.Fog(0x10131a, 40, 110);
+const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.05, 250);
+scene.add(camera);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(innerWidth, innerHeight);
 $('app').appendChild(renderer.domElement);
@@ -29,34 +30,112 @@ const dir = new THREE.DirectionalLight(0xffffff, 0.9);
 dir.position.set(10, 30, 10);
 scene.add(dir);
 
-const floor = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), new THREE.MeshLambertMaterial({ color: 0x1b2130 }));
-floor.rotation.x = -Math.PI / 2;
-scene.add(floor);
-const grid = new THREE.GridHelper(40, 40, 0x2d3648, 0x232c3d);
-grid.position.y = 0.01;
-scene.add(grid);
+let mapGroup: THREE.Group | null = null;
 
-const wallMat = new THREE.MeshLambertMaterial({ color: 0x2b3346 });
-const walls3d: { mesh: THREE.Mesh }[] = [];
-const WALLS = [
-  [-20, -20, 20, -19], [-20, 19, 20, 20], [-20, -20, -19, 20], [19, -20, 20, 20],
-  [-6, -4, -1, -3], [-6, 3, -1, 4], [1, -4, 6, -3], [1, 3, 6, 4], [-1, -1, 1, 1],
-];
-for (const [x0, z0, x1, z1] of WALLS) {
-  const w = x1 - x0, d = z1 - z0;
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w || 0.6, 3, d || 0.6), wallMat);
-  mesh.position.set((x0 + x1) / 2, 1.5, (z0 + z1) / 2);
-  scene.add(mesh);
-  walls3d.push({ mesh });
+function buildMap(map: any) {
+  if (mapGroup) {
+    scene.remove(mapGroup);
+    mapGroup.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.geometry) m.geometry.dispose();
+    });
+  }
+  const g = new THREE.Group();
+  const size: number = map?.size ?? 40;
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshLambertMaterial({ color: 0x1b2130 }));
+  floor.rotation.x = -Math.PI / 2;
+  g.add(floor);
+  const grid = new THREE.GridHelper(size, size, 0x2d3648, 0x232c3d);
+  grid.position.y = 0.01;
+  g.add(grid);
+  const tall = new THREE.MeshLambertMaterial({ color: 0x2b3346 });
+  const low = new THREE.MeshLambertMaterial({ color: 0x3a4a63 });
+  for (const w of map?.walls ?? []) {
+    const sx = Math.max(0.05, w.max.x - w.min.x);
+    const sy = Math.max(0.05, w.max.y - w.min.y);
+    const sz = Math.max(0.05, w.max.z - w.min.z);
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), sy < 2 ? low : tall);
+    mesh.position.set((w.min.x + w.max.x) / 2, (w.min.y + w.max.y) / 2, (w.min.z + w.max.z) / 2);
+    g.add(mesh);
+  }
+  for (const t of map?.terminals ?? []) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1.8, 0.6), new THREE.MeshLambertMaterial({ color: 0x0e6b4f }));
+    m.position.set(t.pos.x, 0.9, t.pos.z);
+    g.add(m);
+  }
+  scene.add(g);
+  mapGroup = g;
 }
 
-const TERMINALS = [{ x: -12, z: 0 }, { x: 12, z: 0 }];
-const terminalMeshes: THREE.Mesh[] = [];
-for (const t of TERMINALS) {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1.8, 0.6), new THREE.MeshLambertMaterial({ color: 0x0e6b4f }));
-  m.position.set(t.x, 0.9, t.z);
-  scene.add(m);
-  terminalMeshes.push(m);
+const skinMat = new THREE.MeshLambertMaterial({ color: 0xd8c0a0 });
+const darkMat = new THREE.MeshLambertMaterial({ color: 0x23262e });
+const metalMat = new THREE.MeshLambertMaterial({ color: 0x4a505c });
+const woodMat = new THREE.MeshLambertMaterial({ color: 0x7a4e2d });
+
+function box(w: number, h: number, d: number, mat: THREE.Material, x: number, y: number, z: number): THREE.Mesh {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  m.position.set(x, y, z);
+  return m;
+}
+
+function tube(r0: number, r1: number, len: number, mat: THREE.Material, x: number, y: number, z: number): THREE.Mesh {
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(r0, r1, len, 12), mat);
+  m.rotation.x = Math.PI / 2;
+  m.position.set(x, y, z);
+  return m;
+}
+
+function buildGun(name: string): { group: THREE.Group; muzzleZ: number } {
+  const g = new THREE.Group();
+  const n = name.toUpperCase();
+  let muzzleZ = -0.6;
+  if (n.includes('AWP')) {
+    g.add(box(0.06, 0.09, 0.6, darkMat, 0, 0, -0.1));
+    g.add(tube(0.012, 0.012, 0.6, metalMat, 0, 0.02, -0.65));
+    g.add(tube(0.03, 0.03, 0.3, metalMat, 0, 0.1, -0.15));
+    g.add(box(0.05, 0.09, 0.3, woodMat, 0, -0.02, 0.3));
+    muzzleZ = -0.95;
+  } else if (n.includes('CANNON')) {
+    g.add(tube(0.07, 0.09, 0.8, darkMat, 0, 0, -0.2));
+    g.add(tube(0.095, 0.095, 0.06, metalMat, 0, 0, -0.6));
+    g.add(box(0.06, 0.12, 0.12, metalMat, 0, -0.1, 0.05));
+    muzzleZ = -0.65;
+  } else if (n.includes('AK')) {
+    g.add(box(0.06, 0.09, 0.45, darkMat, 0, 0, -0.1));
+    g.add(tube(0.012, 0.012, 0.4, metalMat, 0, 0.02, -0.5));
+    g.add(box(0.05, 0.08, 0.25, woodMat, 0, -0.02, 0.25));
+    const mag = box(0.04, 0.15, 0.07, metalMat, 0, -0.13, -0.05);
+    mag.rotation.x = 0.25;
+    g.add(mag);
+    muzzleZ = -0.72;
+  } else {
+    g.add(box(0.06, 0.1, 0.35, darkMat, 0, 0, -0.05));
+    g.add(tube(0.012, 0.012, 0.18, metalMat, 0, 0.02, -0.3));
+    g.add(box(0.04, 0.14, 0.06, metalMat, 0, -0.12, -0.02));
+    muzzleZ = -0.4;
+  }
+  g.add(box(0.07, 0.07, 0.1, skinMat, 0, -0.1, 0.05));
+  g.add(box(0.07, 0.07, 0.1, skinMat, 0, -0.05, -0.3));
+  return { group: g, muzzleZ };
+}
+
+const gunRoot = new THREE.Group();
+camera.add(gunRoot);
+const muzzleFlash = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 8), new THREE.MeshBasicMaterial({ color: 0xffd060 }));
+muzzleFlash.visible = false;
+let gunModel: THREE.Group | null = null;
+let gunName = '';
+let gunKick = 0;
+let muzzleUntil = 0;
+
+function setGun(name: string) {
+  if (gunModel) gunRoot.remove(gunModel);
+  const built = buildGun(name);
+  gunModel = built.group;
+  muzzleFlash.position.set(0, 0.02, built.muzzleZ);
+  gunModel.add(muzzleFlash);
+  gunRoot.add(gunModel);
+  gunName = name;
 }
 
 const playerMeshes = new Map<number, THREE.Group>();
@@ -65,9 +144,11 @@ function playerMesh(team: string) {
   const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.35, 0.9, 4, 8), new THREE.MeshLambertMaterial({ color: team === 'red' ? 0xb04545 : 0x4577b0 }));
   body.position.y = 0.85;
   g.add(body);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 12), new THREE.MeshLambertMaterial({ color: 0xd8c0a0 }));
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 12), skinMat);
   head.position.y = 1.55;
   g.add(head);
+  g.add(box(0.08, 0.1, 0.6, darkMat, 0.3, 1.05, 0.45));
+  g.add(box(0.1, 0.1, 0.1, skinMat, 0.3, 1.05, 0.2));
   scene.add(g);
   return g;
 }
@@ -94,6 +175,7 @@ function handle(msg: ServerToClient) {
       templates = msg.templates ?? [];
       budgetCfg = (msg.config as any)?.budget;
       matchCfg = (msg.config as any)?.match;
+      buildMap((msg.config as any)?.map);
       $('menu').style.display = 'none';
       break;
     case 'state':
@@ -123,6 +205,10 @@ function handle(msg: ServerToClient) {
       const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffe08a }));
       scene.add(line);
       TRACERS.push({ line, until: performance.now() + 90 });
+      if (msg.shooterId === youId) {
+        gunKick = 1;
+        muzzleUntil = performance.now() + 50;
+      }
       break;
     }
     case 'explosion': {
@@ -169,6 +255,8 @@ function renderState() {
     camera.rotation.order = 'YXZ';
     camera.rotation.y = you.yaw + Math.PI;
     camera.rotation.x = pitch;
+    if (you.weaponName !== gunName) setGun(you.weaponName);
+    gunRoot.visible = you.alive && $('editor').style.display !== 'flex';
   }
 
   const seen = new Set<number>();
@@ -176,7 +264,7 @@ function renderState() {
     seen.add(p.id);
     let g = playerMeshes.get(p.id);
     if (!g) { g = playerMesh(p.team); playerMeshes.set(p.id, g); }
-    g.visible = p.alive;
+    g.visible = p.alive && p.id !== youId;
     g.position.set(p.pos.x, 0, p.pos.z);
     g.rotation.y = p.yaw;
   }
@@ -397,9 +485,13 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
+let lastFrame = performance.now();
+
 function animate() {
   requestAnimationFrame(animate);
   const now = performance.now();
+  const dtSec = Math.min(0.1, (now - lastFrame) / 1000);
+  lastFrame = now;
   for (let i = TRACERS.length - 1; i >= 0; i--) {
     if (now > TRACERS[i].until) {
       scene.remove(TRACERS[i].line);
@@ -420,6 +512,12 @@ function animate() {
       (ex.mesh.material as THREE.MeshBasicMaterial).opacity = 0.8 * (1 - k);
     }
   }
+  gunKick = Math.max(0, gunKick - dtSec * 8);
+  const moving = keys['KeyW'] || keys['KeyA'] || keys['KeyS'] || keys['KeyD'];
+  const bob = moving ? Math.sin(now / 110) * 0.008 : 0;
+  gunRoot.position.set(0.22 + bob, -0.2 + Math.abs(bob), -0.45 + gunKick * 0.07);
+  gunRoot.rotation.x = gunKick * 0.12;
+  muzzleFlash.visible = now < muzzleUntil;
   renderer.render(scene, camera);
 }
 animate();

@@ -66,7 +66,7 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({
           t: 'joined', youId: p.id, state: match.state(),
           templates: WEAPON_TEMPLATES,
-          config: { budget: (balance as any).budget, match: (balance as any).match },
+          config: { budget: (balance as any).budget, match: (balance as any).match, map: match.getMap() },
         }));
         return;
       }

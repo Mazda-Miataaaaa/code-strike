@@ -11,11 +11,29 @@ export interface GameMap {
 }
 
 export function makeMap(): GameMap {
-  const S = 40;
+  const S = 60;
   const w = (x0: number, z0: number, x1: number, z1: number, h = 3): Wall => ({
     min: { x: x0, y: 0, z: z0 },
     max: { x: x1, y: h, z: z1 },
   });
+  const mirror = (a: Wall): Wall => ({
+    min: { x: -a.max.x, y: 0, z: -a.max.z },
+    max: { x: -a.min.x, y: a.max.y, z: -a.min.z },
+  });
+  const half: Wall[] = [
+    w(-20, 8, -8, 9),
+    w(-8, 9, -7, 16),
+    w(-28, -8, -22, -7),
+    w(-14, -20, -13, -12),
+    w(-6, -14, 2, -13),
+    w(-18, -4, -16, 2),
+    w(-26, 14, -20, 15),
+    w(8, -6, 12, -5),
+    w(10, 16, 11, 24),
+    w(-12, -1, -9, 1, 1.2),
+    w(-4, 18, 0, 19, 1.2),
+    w(-24, -18, -20, -16, 1.2),
+  ];
   return {
     size: S,
     walls: [
@@ -23,26 +41,24 @@ export function makeMap(): GameMap {
       w(-S / 2, S / 2 - 1, S / 2, S / 2),
       w(-S / 2, -S / 2, -S / 2 + 1, S / 2),
       w(S / 2 - 1, -S / 2, S / 2, S / 2),
-      w(-6, -4, -1, -3),
-      w(-6, 3, -1, 4),
-      w(1, -4, 6, -3),
-      w(1, 3, 6, 4),
-      w(-1, -1, 1, 1),
+      w(-3, -3, 3, 3),
+      ...half,
+      ...half.map(mirror),
     ],
     terminals: [
-      { serverId: 0, pos: { x: -12, y: 0, z: 0 } },
-      { serverId: 1, pos: { x: 12, y: 0, z: 0 } },
+      { serverId: 0, pos: { x: -20, y: 0, z: 0 } },
+      { serverId: 1, pos: { x: 20, y: 0, z: 0 } },
     ],
     spawns: {
       red: [
-        { x: -16, y: 0, z: 14 },
-        { x: -14, y: 0, z: 16 },
-        { x: -18, y: 0, z: 16 },
+        { x: -24, y: 0, z: 22 },
+        { x: -22, y: 0, z: 25 },
+        { x: -26, y: 0, z: 25 },
       ],
       blue: [
-        { x: 16, y: 0, z: -14 },
-        { x: 14, y: 0, z: -16 },
-        { x: 18, y: 0, z: -16 },
+        { x: 24, y: 0, z: -22 },
+        { x: 22, y: 0, z: -25 },
+        { x: 26, y: 0, z: -25 },
       ],
     },
   };
