@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { ServerToClient, MatchState, WeaponScriptFile, BudgetReport } from '../shared/protocol.js';
+import { initAudio, toggleMute, handleAudioEvent, audioOnState } from './audio.js';
 
 const $ = <T extends HTMLElement = HTMLDivElement>(id: string) => document.getElementById(id) as T;
 
@@ -9,11 +10,11 @@ let state: MatchState | null = null;
 let templates: WeaponScriptFile[] = [];
 let budgetCfg: any = null;
 let matchCfg: any = null;
-let ammoLocal = 0;
 let inTerminal = -1;
 let lastWeaponReport: { report?: BudgetReport } | null = null;
 
 const TRACERS: { line: THREE.Line; until: number }[] = [];
+const EXPLOSIONS: { mesh: THREE.Mesh; start: number; dur: number; radius: number }[] = [];
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x10131a);
@@ -86,6 +87,7 @@ function send(msg: any) {
 }
 
 function handle(msg: ServerToClient) {
+  handleAudioEvent(msg, youId, state);
   switch (msg.t) {
     case 'joined':
       youId = msg.youId;
@@ -123,6 +125,17 @@ function handle(msg: ServerToClient) {
       TRACERS.push({ line, until: performance.now() + 90 });
       break;
     }
+    case 'explosion': {
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(1, 16, 12),
+        new THREE.MeshBasicMaterial({ color: 0xffa040, transparent: true, opacity: 0.8 }),
+      );
+      mesh.position.set(msg.pos.x, Math.max(0.5, msg.pos.y), msg.pos.z);
+      mesh.scale.setScalar(0.1);
+      scene.add(mesh);
+      EXPLOSIONS.push({ mesh, start: performance.now(), dur: 350, radius: msg.radius });
+      break;
+    }
     case 'died':
       if (msg.id === youId) showLog('you were eliminated — respawning…');
       break;
@@ -140,6 +153,7 @@ function showLog(text: string) {
 
 function renderState() {
   if (!state) return;
+  audioOnState(state, youId);
   const phase = $('phase');
   const remain = Math.max(0, Math.ceil((state.phaseEndsAt - Date.now()) / 1000));
   phase.textContent = `${state.phase} ${remain}s`;
@@ -150,11 +164,11 @@ function renderState() {
     $('hpval').textContent = String(you.hp);
     $('hpbar').style.width = (100 * you.hp / you.maxHp) + '%';
     $('wname').textContent = you.weaponName;
-    if (state.phase !== 'live') ammoLocal = 0;
-    $('wammo').textContent = `${ammoLocal}`;
+    $('wammo').textContent = `${you.ammo}/${you.magazine}`;
     camera.position.set(you.pos.x, 1.6, you.pos.z);
     camera.rotation.order = 'YXZ';
     camera.rotation.y = you.yaw + Math.PI;
+    camera.rotation.x = pitch;
   }
 
   const seen = new Set<number>();
@@ -202,10 +216,14 @@ addEventListener('keydown', (e) => {
   keys[e.code] = true;
   if (e.code === 'Tab') { e.preventDefault(); openEditor('weapon'); }
   if (e.code === 'KeyE') tryInteract();
+  if (e.code === 'KeyM' && document.activeElement?.tagName !== 'TEXTAREA' && document.activeElement?.tagName !== 'INPUT') {
+    showLog(toggleMute() ? 'sound off' : 'sound on');
+  }
   if (e.code === 'Escape') { closeEditor(); closeTerminal(); }
 });
 addEventListener('keyup', (e) => { keys[e.code] = false; });
 renderer.domElement.addEventListener('mousedown', (e) => {
+  initAudio();
   mouseDown = true;
   if (!pointerLocked) renderer.domElement.requestPointerLock();
 });
@@ -341,8 +359,8 @@ function openTerminalUI(serverId: number, source: string, hint: string) {
   box.style.display = 'block';
   box.textContent = `-- server-${serverId} source (${hint})\n\n` + source;
   document.exitPointerLock?.();
-  const mode = (state?.players.find((p) => p.id === youId)?.team) === 'blue' ? 'patch' : 'exploit';
-  openEditor('exploit' === mode ? 'exploit' : 'exploit', serverId);
+  const mode: 'exploit' | 'patch' = (state?.players.find((p) => p.id === youId)?.team) === 'blue' ? 'patch' : 'exploit';
+  openEditor(mode, serverId);
   const tabs = document.createElement('div');
   tabs.style.cssText = 'position:fixed;top:8px;right:8px;display:flex;gap:8px;z-index:60';
   tabs.innerHTML = `<button id="tab-exploit" class="ghost">exploit</button><button id="tab-patch" class="ghost">defense patch</button>`;
@@ -357,7 +375,7 @@ function openTerminalUI(serverId: number, source: string, hint: string) {
   };
   (document.getElementById('tab-exploit') as HTMLButtonElement).onclick = () => setMode('exploit');
   (document.getElementById('tab-patch') as HTMLButtonElement).onclick = () => setMode('patch');
-  setMode('exploit');
+  setMode(mode);
 }
 
 function closeTerminal() {
@@ -371,7 +389,7 @@ function closeTerminal() {
   if (tabs) tabs.remove();
 }
 
-$('join').onclick = connect;
+$('join').onclick = () => { initAudio(); connect(); };
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -385,7 +403,21 @@ function animate() {
   for (let i = TRACERS.length - 1; i >= 0; i--) {
     if (now > TRACERS[i].until) {
       scene.remove(TRACERS[i].line);
+      TRACERS[i].line.geometry.dispose();
       TRACERS.splice(i, 1);
+    }
+  }
+  for (let i = EXPLOSIONS.length - 1; i >= 0; i--) {
+    const ex = EXPLOSIONS[i];
+    const k = (now - ex.start) / ex.dur;
+    if (k >= 1) {
+      scene.remove(ex.mesh);
+      ex.mesh.geometry.dispose();
+      (ex.mesh.material as THREE.Material).dispose();
+      EXPLOSIONS.splice(i, 1);
+    } else {
+      ex.mesh.scale.setScalar(Math.max(0.1, ex.radius * k));
+      (ex.mesh.material as THREE.MeshBasicMaterial).opacity = 0.8 * (1 - k);
     }
   }
   renderer.render(scene, camera);
